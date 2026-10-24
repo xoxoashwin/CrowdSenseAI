@@ -21,3 +21,5 @@ htmlcov/
 
 # Uploads
 uploads/
+
+*.pt
