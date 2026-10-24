@@ -23,3 +23,8 @@ htmlcov/
 uploads/
 
 *.pt
+
+# Node / Frontend
+node_modules/
+dist/
+.DS_Store
