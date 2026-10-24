@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background-color: #AEC3B0;
+    color: #263B2B;
+  }
+}
+
+/* Custom scrollbar in sage and forest tones */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #AEC3B0;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #6B9071;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #37553A;
+}
+
+/* Card utilities */
+.forest-card {
+  background-color: #F7FAF6;
+  border: 1px solid #D4E0D5;
+  box-shadow: 0 1px 4px 0 rgba(38, 59, 43, 0.04);
+  transition: all 0.2s ease-in-out;
+}
+
+.forest-card-interactive {
+  background-color: #F7FAF6;
+  border: 1px solid #D4E0D5;
+  box-shadow: 0 1px 4px 0 rgba(38, 59, 43, 0.04);
+  transition: all 0.2s ease-in-out;
+}
+
+.forest-card-interactive:hover {
+  border-color: #6B9071;
+  box-shadow: 0 4px 12px -2px rgba(55, 85, 58, 0.1);
+}
+
+/* Primary Button: Dark Forest Green with White Text */
+.btn-forest-primary {
+  background-color: #37553A;
+  color: #FFFFFF;
+  font-weight: 600;
+  border: 1px solid #37553A;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-forest-primary:hover {
+  background-color: #2A422D;
+  border-color: #2A422D;
+}
+
+.btn-forest-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Secondary Button: Light Sage with Dark Green Text */
+.btn-forest-secondary {
+  background-color: #DCE8DD;
+  color: #263B2B;
+  font-weight: 600;
+  border: 1px solid #D4E0D5;
+  transition: all 0.15s ease-in-out;
+}
+
+.btn-forest-secondary:hover {
+  background-color: #C8DBC9;
+}
+
+.btn-forest-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
