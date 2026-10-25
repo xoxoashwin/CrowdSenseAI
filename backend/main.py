@@ -4,13 +4,21 @@ Provides REST API endpoints for occupancy tracking, statistics, and health check
 """
 
 from contextlib import asynccontextmanager
+import logging
 import os
 from typing import Optional
 import uuid
 
 import cv2
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
+
+# Configure logging
+logger = logging.getLogger("crowdsense.api")
 
 from backend import database
 from backend.counter import OccupancyCounter
@@ -90,6 +98,79 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================================
+# Global Error Boundaries & Exception Handlers
+# ============================================================================
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Catches request payload and parameter validation errors, returning structured JSON.
+    """
+    logger.warning("Request validation failed on %s %s: %s", request.method, request.url.path, exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": "ValidationError",
+            "message": "The request body or parameters failed validation.",
+            "detail": exc.errors(),
+            "status_code": 422,
+        },
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """
+    Handles standard HTTP exceptions with structured JSON error details.
+    Preserves 'detail' field for backwards compatibility with existing clients and tests.
+    """
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": "HttpException",
+            "message": exc.detail if isinstance(exc.detail, str) else "HTTP Error",
+            "detail": exc.detail,
+            "status_code": exc.status_code,
+        },
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(ClientDisconnect)
+async def client_disconnect_handler(request: Request, exc: ClientDisconnect):
+    """
+    Gracefully handles client disconnections without crashing or dumping socket traces.
+    """
+    logger.info("Client disconnected during %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=499,
+        content={
+            "error": "ClientDisconnect",
+            "message": "Client closed the connection before the request was completed.",
+            "status_code": 499,
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """
+    Catch-all global error boundary for unexpected backend exceptions.
+    Prevents unhandled crashes and returns standardized 500 JSON payloads.
+    """
+    logger.error("Unhandled exception processing %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": "InternalServerError",
+            "message": "An unexpected error occurred while processing your request.",
+            "detail": str(exc),
+            "status_code": 500,
+        },
+    )
 
 
 @app.get(
@@ -227,6 +308,11 @@ def start_video_processing(request: VideoProcessRequest) -> VideoProcessStatusRe
     Processes video frame-by-frame in a separate background thread without blocking the API.
     """
     try:
+        logger.info(
+            "POST /video/process: video_path='%s', line_pos=%s, dir='%s', conf=%s, mode='%s', max_frames=%s",
+            request.video_path, request.line_position, request.entry_direction,
+            request.conf_threshold, request.point_mode, request.max_frames,
+        )
         coords = tuple(request.line_coords) if request.line_coords and len(request.line_coords) == 4 else None
         status_data = video_manager.start_job(
             video_path=request.video_path,
@@ -236,6 +322,8 @@ def start_video_processing(request: VideoProcessRequest) -> VideoProcessStatusRe
             conf_threshold=request.conf_threshold,
             model_name=request.model_name,
             max_frames=request.max_frames,
+            point_mode=request.point_mode,
+            save_debug_video=request.save_debug_video,
         )
         return VideoProcessStatusResponse(**status_data)
     except FileNotFoundError as e:
@@ -256,6 +344,22 @@ def get_video_status() -> VideoProcessStatusResponse:
     """
     status_data = video_manager.get_status()
     return VideoProcessStatusResponse(**status_data)
+
+
+
+@app.get(
+    "/video/debug/download",
+    summary="Download annotated debug video",
+    tags=["Video Processing"],
+)
+def download_debug_video(path: str = Query(..., description="Path to debug video file")) -> FileResponse:
+    """
+    Returns the annotated debug video file containing bounding boxes,
+    tracker IDs, virtual doorway line, and detected crossings.
+    """
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Debug video not found.")
+    return FileResponse(path, media_type="video/mp4", filename=os.path.basename(path))
 
 
 @app.post(
@@ -344,6 +448,10 @@ async def upload_video(file: UploadFile = File(...)) -> VideoUploadResponse:
             detail="Uploaded file is not a valid or readable video.",
         )
 
+    logger.info(
+        "Video upload successful: original='%s', filename='%s', size=%d bytes, path='%s'",
+        original_filename, unique_filename, total_bytes, destination_path
+    )
     return VideoUploadResponse(
         message="Video uploaded and validated successfully.",
         filename=unique_filename,

@@ -60,6 +60,8 @@ class VideoProcessRequest(BaseModel):
     conf_threshold: float = Field(0.25, ge=0.0, le=1.0, description="YOLO detection confidence threshold")
     model_name: str = Field("yolov8n.pt", description="YOLO model name or weights path")
     max_frames: Optional[int] = Field(None, ge=1, description="Optional frame limit for processing")
+    point_mode: str = Field("center", description="Anchor point: 'center' (centroid) or 'bottom_center' (feet)")
+    save_debug_video: bool = Field(False, description="Whether to export an annotated debug video")
 
 
 class VideoProcessStatusResponse(BaseModel):
@@ -72,6 +74,9 @@ class VideoProcessStatusResponse(BaseModel):
     exits_detected: int = Field(0, description="Total exits detected in this video run")
     current_fps: float = Field(0.0, description="Current processing speed in FPS")
     error_message: Optional[str] = Field(None, description="Error details if job failed")
+    debug_video_path: Optional[str] = Field(None, description="Path to generated debug video if requested")
+    point_mode: Optional[str] = Field("center", description="Anchor point used for detection")
+    run_id: Optional[str] = Field(None, description="Unique run identifier for the processing job")
     stats: Optional[StatsResponse] = Field(None, description="Current venue occupancy statistics")
 
 
@@ -80,5 +85,3 @@ class VideoUploadResponse(BaseModel):
     filename: str = Field(..., description="Unique server-generated filename")
     video_path: str = Field(..., description="Absolute path to the saved video file")
     size_bytes: int = Field(..., ge=1, description="Size of the uploaded video in bytes")
-
-

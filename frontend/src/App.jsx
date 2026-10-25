@@ -6,6 +6,7 @@ import VideoProcessing from './pages/VideoProcessing';
 import EventHistory from './pages/EventHistory';
 import Analytics from './pages/Analytics';
 import Settings from './pages/Settings';
+import ErrorBoundary from './components/ErrorBoundary';
 import { getHealth, getStats, getEvents, getVideoStatus } from './api';
 
 const STORAGE_KEY_CAPACITY = 'crowdsense_venue_capacity';
@@ -93,12 +94,16 @@ export default function App() {
 
   // Initial fetch and 5s polling interval
   useEffect(() => {
+    let isMounted = true;
     fetchData();
     const interval = setInterval(() => {
-      fetchData();
+      if (isMounted) fetchData();
     }, 5000);
 
-    return () => clearInterval(interval);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, [fetchData]);
 
   const pageMeta = {
@@ -150,62 +155,68 @@ export default function App() {
         />
 
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
-          {activeTab === 'dashboard' && (
-            <Dashboard
-              stats={stats}
-              events={events}
-              isConnected={isConnected}
-              isChecking={isChecking}
-              onRefresh={fetchData}
-              videoStatus={videoStatus}
-              onNavigate={(tab) => setActiveTab(tab)}
-              venueCapacity={venueCapacity}
-            />
-          )}
+          <ErrorBoundary
+            key={activeTab}
+            fallbackMessage="This view encountered an unexpected rendering error. Your backend and database records remain completely unaffected."
+            onReset={fetchData}
+          >
+            {activeTab === 'dashboard' && (
+              <Dashboard
+                stats={stats}
+                events={events}
+                isConnected={isConnected}
+                isChecking={isChecking}
+                onRefresh={fetchData}
+                videoStatus={videoStatus}
+                onNavigate={(tab) => setActiveTab(tab)}
+                venueCapacity={venueCapacity}
+              />
+            )}
 
-          {activeTab === 'video' && (
-            <VideoProcessing
-              isConnected={isConnected}
-              isChecking={isChecking}
-              onRefreshStats={fetchData}
-              videoStatus={videoStatus}
-              setVideoStatus={setVideoStatus}
-            />
-          )}
+            {activeTab === 'video' && (
+              <VideoProcessing
+                isConnected={isConnected}
+                isChecking={isChecking}
+                onRefreshStats={fetchData}
+                videoStatus={videoStatus}
+                setVideoStatus={setVideoStatus}
+              />
+            )}
 
-          {activeTab === 'events' && (
-            <EventHistory
-              events={events}
-              isConnected={isConnected}
-              isChecking={isChecking}
-              onRefresh={fetchData}
-              limit={limit}
-              setLimit={setLimit}
-            />
-          )}
+            {activeTab === 'events' && (
+              <EventHistory
+                events={events}
+                isConnected={isConnected}
+                isChecking={isChecking}
+                onRefresh={fetchData}
+                limit={limit}
+                setLimit={setLimit}
+              />
+            )}
 
-          {activeTab === 'analytics' && (
-            <Analytics
-              events={events}
-              stats={stats}
-              isConnected={isConnected}
-              isChecking={isChecking}
-              onRefresh={fetchData}
-              venueCapacity={venueCapacity}
-            />
-          )}
+            {activeTab === 'analytics' && (
+              <Analytics
+                events={events}
+                stats={stats}
+                isConnected={isConnected}
+                isChecking={isChecking}
+                onRefresh={fetchData}
+                venueCapacity={venueCapacity}
+              />
+            )}
 
-          {activeTab === 'settings' && (
-            <Settings
-              health={health}
-              stats={stats}
-              isConnected={isConnected}
-              isChecking={isChecking}
-              onRefresh={fetchData}
-              venueCapacity={venueCapacity}
-              onUpdateVenueCapacity={updateVenueCapacity}
-            />
-          )}
+            {activeTab === 'settings' && (
+              <Settings
+                health={health}
+                stats={stats}
+                isConnected={isConnected}
+                isChecking={isChecking}
+                onRefresh={fetchData}
+                venueCapacity={venueCapacity}
+                onUpdateVenueCapacity={updateVenueCapacity}
+              />
+            )}
+          </ErrorBoundary>
         </main>
       </div>
     </div>

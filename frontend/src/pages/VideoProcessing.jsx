@@ -13,12 +13,16 @@ import {
   Clock,
   Gauge,
   Film,
+  Crosshair,
+  Download,
+  Eye,
 } from 'lucide-react';
 import {
   uploadVideo,
   startVideoProcessing,
   getVideoStatus,
   stopVideoProcessing,
+  getDebugVideoUrl,
 } from '../api';
 import BackendAlertBanner from '../components/BackendAlertBanner';
 
@@ -34,6 +38,7 @@ export default function VideoProcessing({
 }) {
   // File upload state
   const [selectedFile, setSelectedFile] = useState(null);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -44,6 +49,8 @@ export default function VideoProcessing({
   const [linePosition, setLinePosition] = useState(0.5);
   const [entryDirection, setEntryDirection] = useState('down');
   const [confThreshold, setConfThreshold] = useState(0.25);
+  const [pointMode, setPointMode] = useState('center');
+  const [saveDebugVideo, setSaveDebugVideo] = useState(false);
   const [modelName, setModelName] = useState('yolov8n.pt');
   const [maxFrames, setMaxFrames] = useState('');
 
@@ -53,6 +60,18 @@ export default function VideoProcessing({
   const [processError, setProcessError] = useState(null);
 
   const fileInputRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  // Clean up object preview URL on unmount or file change
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (videoPreviewUrl) {
+        URL.revokeObjectURL(videoPreviewUrl);
+      }
+    };
+  }, [videoPreviewUrl]);
 
   // Poll video status periodically when job is running or stopping
   useEffect(() => {
@@ -63,10 +82,14 @@ export default function VideoProcessing({
       interval = setInterval(async () => {
         try {
           const status = await getVideoStatus();
-          setVideoStatus(status);
-          if (onRefreshStats) onRefreshStats();
+          if (isMountedRef.current) {
+            setVideoStatus(status);
+            if (onRefreshStats) onRefreshStats();
+          }
         } catch (err) {
-          console.error('Failed to poll video status:', err);
+          if (isMountedRef.current) {
+            console.error('Failed to poll video status:', err);
+          }
         }
       }, 1500);
     }
@@ -98,19 +121,33 @@ export default function VideoProcessing({
 
   const handleFileSelect = (file) => {
     setUploadError(null);
-    setUploadResult(null);
     setProcessError(null);
-
     const error = validateFile(file);
     if (error) {
       setUploadError(error);
       setSelectedFile(null);
+      setVideoPreviewUrl(null);
       return;
     }
-
     setSelectedFile(file);
+    setUploadResult(null);
+
+    // Create object URL for local video line preview
+    try {
+      if (videoPreviewUrl) {
+        URL.revokeObjectURL(videoPreviewUrl);
+      }
+      const url = URL.createObjectURL(file);
+      setVideoPreviewUrl(url);
+    } catch (e) {
+      console.warn('Could not create object URL for preview:', e);
+    }
+
+    // Auto-upload the selected file immediately
+    handleUpload(file);
   };
 
+  // Drag-and-drop handlers
   const handleDragOver = (e) => {
     e.preventDefault();
     setIsDragging(true);
@@ -129,33 +166,62 @@ export default function VideoProcessing({
     }
   };
 
-  // Perform upload
-  const handleUpload = async () => {
-    if (!selectedFile) return;
+  // Execute chunked/streaming file upload
+  const handleUpload = async (fileOverride = null) => {
+    const file = fileOverride || selectedFile;
+    if (!file) return null;
 
     try {
       setIsUploading(true);
-      setUploadError(null);
       setUploadProgress(0);
+      setUploadError(null);
 
-      const result = await uploadVideo(selectedFile, (percent) => {
-        setUploadProgress(percent);
+      const response = await uploadVideo(file, (percent) => {
+        if (isMountedRef.current) {
+          setUploadProgress(percent);
+        }
       });
 
-      setUploadResult(result);
+      if (isMountedRef.current) {
+        setUploadResult(response);
+      }
+      return response;
     } catch (err) {
-      setUploadError(err.message || 'Failed to upload video');
+      if (isMountedRef.current) {
+        setUploadError(err.message || 'Failed to upload video to backend storage.');
+      }
+      return null;
     } finally {
-      setIsUploading(false);
+      if (isMountedRef.current) {
+        setIsUploading(false);
+      }
     }
   };
 
-  // Start processing (only when explicitly triggered by user)
+  // Start processing
   const handleStartProcessing = async () => {
-    const targetVideoPath = uploadResult?.video_path || videoStatus?.video_path;
+    setProcessError(null);
+
+    let activeUpload = uploadResult;
+
+    // If user has a selected file that hasn't completed upload yet, upload it now
+    if (selectedFile && !activeUpload) {
+      if (isUploading) {
+        setProcessError('Upload is currently in progress. Please wait a moment...');
+        return;
+      }
+      activeUpload = await handleUpload(selectedFile);
+      if (!activeUpload) {
+        setProcessError('Failed to upload selected video file. Please retry.');
+        return;
+      }
+    }
+
+    // Ensure we NEVER fall back to a previous video if a new file was chosen!
+    const targetVideoPath = activeUpload?.video_path || (!selectedFile ? videoStatus?.video_path : null);
 
     if (!targetVideoPath) {
-      setProcessError('Please upload a video first.');
+      setProcessError('Please select or upload a video before starting the tracking engine.');
       return;
     }
 
@@ -163,22 +229,45 @@ export default function VideoProcessing({
       setIsStarting(true);
       setProcessError(null);
 
+      // Immediately reset run metrics in the UI so previous video run results don't linger
+      if (isMountedRef.current) {
+        setVideoStatus((prev) => ({
+          ...(prev || {}),
+          status: 'running',
+          video_path: targetVideoPath,
+          total_frames: 0,
+          processed_frames: 0,
+          progress_percentage: 0,
+          entries_detected: 0,
+          exits_detected: 0,
+          current_fps: 0,
+        }));
+      }
+
       const params = {
         video_path: targetVideoPath,
         line_position: parseFloat(linePosition),
         entry_direction: entryDirection,
         conf_threshold: parseFloat(confThreshold),
+        point_mode: pointMode,
+        save_debug_video: saveDebugVideo,
         model_name: modelName,
         ...(maxFrames ? { max_frames: parseInt(maxFrames, 10) } : {}),
       };
 
       const result = await startVideoProcessing(params);
-      setVideoStatus(result);
-      if (onRefreshStats) onRefreshStats();
+      if (isMountedRef.current) {
+        setVideoStatus(result);
+        if (onRefreshStats) onRefreshStats();
+      }
     } catch (err) {
-      setProcessError(err.message || 'Failed to start video processing');
+      if (isMountedRef.current) {
+        setProcessError(err.message || 'Failed to start video processing');
+      }
     } finally {
-      setIsStarting(false);
+      if (isMountedRef.current) {
+        setIsStarting(false);
+      }
     }
   };
 
@@ -187,12 +276,18 @@ export default function VideoProcessing({
     try {
       setIsStopping(true);
       const result = await stopVideoProcessing();
-      setVideoStatus(result);
-      if (onRefreshStats) onRefreshStats();
+      if (isMountedRef.current) {
+        setVideoStatus(result);
+        if (onRefreshStats) onRefreshStats();
+      }
     } catch (err) {
-      setProcessError(err.message || 'Failed to stop video processing');
+      if (isMountedRef.current) {
+        setProcessError(err.message || 'Failed to stop video processing');
+      }
     } finally {
-      setIsStopping(false);
+      if (isMountedRef.current) {
+        setIsStopping(false);
+      }
     }
   };
 
@@ -201,28 +296,26 @@ export default function VideoProcessing({
 
   return (
     <div className="space-y-6">
+      {/* Backend Disconnection Banner */}
       {!isConnected && (
-        <BackendAlertBanner onRetry={onRefreshStats} isChecking={isChecking} />
+        <BackendAlertBanner
+          isConnected={isConnected}
+          isChecking={isChecking}
+          onRetry={onRefreshStats}
+        />
       )}
 
-      {/* Grid: Upload & Configuration */}
+      {/* Main Grid: Upload (Left) & Tuning Controls (Right) */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Upload Section (7 cols) */}
+        {/* Left Column: Drag & Drop Ingestion (7 cols) */}
         <div className="lg:col-span-7 space-y-6">
           <div className="bg-[#F7FAF6] rounded-2xl p-6 border border-[#D4E0D5] shadow-forest-card">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-base font-bold text-[#263B2B]">Meeting Footage Ingestion</h3>
-                <p className="text-xs text-[#627466] mt-0.5">
-                  Upload hall or doorway video footage for AI person tracking and automated counts.
-                </p>
-              </div>
-              <span className="text-xs font-mono px-2 py-0.5 rounded bg-[#DCE8DD] text-[#37553A] font-bold border border-[#AEC3B0]">
-                Max 500 MB
-              </span>
+            <div className="flex items-center gap-2 mb-4">
+              <FileVideo className="w-5 h-5 text-[#37553A]" />
+              <h3 className="text-base font-bold text-[#263B2B]">Footage Ingestion</h3>
             </div>
 
-            {/* Drop Zone with Light Sage Background & Muted Green Border */}
+            {/* Drag & Drop Surface */}
             <div
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
@@ -267,7 +360,7 @@ export default function VideoProcessing({
               </div>
             )}
 
-            {/* Selected File Card & Dark Forest Green Upload Trigger */}
+            {/* Selected File Card & Upload Trigger */}
             {selectedFile && !uploadResult && (
               <div className="mt-5 p-4 rounded-xl bg-[#E8F0E8] border border-[#D4E0D5] flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="flex items-center gap-3">
@@ -303,7 +396,7 @@ export default function VideoProcessing({
               </div>
             )}
 
-            {/* Upload Progress Bar in Forest Green */}
+            {/* Upload Progress Bar */}
             {isUploading && (
               <div className="mt-4 space-y-1.5">
                 <div className="flex justify-between text-xs text-[#627466]">
@@ -339,6 +432,48 @@ export default function VideoProcessing({
                 </div>
               </div>
             )}
+
+            {/* Interactive Doorway Line Preview (When video is loaded) */}
+            {videoPreviewUrl && (
+              <div className="mt-5 p-3 rounded-xl bg-[#E8F0E8] border border-[#D4E0D5]">
+                <div className="flex items-center justify-between text-xs font-semibold text-[#263B2B] mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <Eye className="w-3.5 h-3.5 text-[#37553A]" />
+                    <span>Doorway Alignment Preview</span>
+                  </div>
+                  <span className="text-[#37553A] font-mono font-bold text-[11px]">
+                    Line at {(parseFloat(linePosition) * 100).toFixed(0)}%
+                  </span>
+                </div>
+
+                <div className="relative w-full rounded-lg overflow-hidden bg-black aspect-video max-h-48 flex items-center justify-center">
+                  <video
+                    src={videoPreviewUrl}
+                    className="w-full h-full object-contain opacity-90"
+                    muted
+                    playsInline
+                    onLoadedMetadata={(e) => {
+                      e.target.currentTime = 0.5;
+                    }}
+                  />
+                  {/* Overlay Virtual Line */}
+                  <div
+                    className="absolute left-0 right-0 border-t-2 border-dashed border-[#F4A261] z-10 pointer-events-none flex items-center justify-between px-2"
+                    style={{ top: `${parseFloat(linePosition) * 100}%` }}
+                  >
+                    <span className="text-[10px] font-bold bg-[#263B2B]/90 text-white px-1.5 py-0.5 rounded shadow">
+                      Doorway Threshold ({(parseFloat(linePosition) * 100).toFixed(0)}%)
+                    </span>
+                    <span className="text-[10px] font-bold bg-[#37553A]/90 text-white px-1.5 py-0.5 rounded shadow">
+                      {entryDirection === 'down' ? '↓ Entry' : '↑ Entry'}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-[10px] text-[#627466] mt-1.5">
+                  Adjust the line position slider on the right to align directly across the physical entrance threshold.
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -355,21 +490,81 @@ export default function VideoProcessing({
               <div>
                 <div className="flex justify-between text-xs mb-1.5">
                   <span className="text-[#263B2B] font-medium">Virtual Doorway Line</span>
-                  <span className="text-[#37553A] font-mono font-bold">{(linePosition * 100).toFixed(0)}% height</span>
+                  <span className="text-[#37553A] font-mono font-bold">{(parseFloat(linePosition) * 100).toFixed(0)}% height</span>
                 </div>
+
+                {/* Presets */}
+                <div className="grid grid-cols-3 gap-2 mb-2">
+                  {[
+                    { id: 0.1, label: 'Top Gate (0.1)' },
+                    { id: 0.5, label: 'Center (0.5)' },
+                    { id: 0.9, label: 'Bottom (0.9)' },
+                  ].map((pos) => (
+                    <button
+                      key={pos.id}
+                      type="button"
+                      onClick={() => setLinePosition(pos.id)}
+                      className={`p-1.5 rounded-lg text-center border text-[11px] font-medium transition ${
+                        Math.abs(parseFloat(linePosition) - pos.id) < 0.03
+                          ? 'border-[#37553A] bg-[#37553A] text-white font-semibold'
+                          : 'border-[#D4E0D5] bg-[#E8F0E8] text-[#263B2B] hover:bg-[#DCE8DD]'
+                      }`}
+                    >
+                      {pos.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Continuous fine-grain slider */}
                 <input
                   type="range"
-                  min="0.1"
-                  max="0.9"
-                  step="0.05"
+                  min="0.05"
+                  max="0.95"
+                  step="0.02"
                   value={linePosition}
-                  onChange={(e) => setLinePosition(e.target.value)}
+                  onChange={(e) => setLinePosition(parseFloat(e.target.value))}
                   className="w-full accent-[#37553A] h-2 bg-[#DCE8DD] rounded-lg cursor-pointer"
                 />
-                <div className="flex justify-between text-[10px] text-[#627466] mt-1 font-medium">
-                  <span>Top Gate (0.1)</span>
-                  <span>Center (0.5)</span>
-                  <span>Bottom Gate (0.9)</span>
+                <div className="flex justify-between text-[10px] text-[#627466] mt-1 font-medium font-mono">
+                  <span>5% (Top)</span>
+                  <span>50% (Center)</span>
+                  <span>95% (Floor)</span>
+                </div>
+              </div>
+
+              {/* Anchor Point Mode */}
+              <div>
+                <label className="block text-xs font-semibold text-[#263B2B] mb-1.5 flex items-center justify-between">
+                  <span>Detection Anchor Point</span>
+                  <span className="text-[10px] text-[#37553A] font-bold font-mono">
+                    {pointMode === 'center' ? 'Torso / Centroid' : 'Feet / Ground'}
+                  </span>
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPointMode('center')}
+                    className={`p-2 rounded-xl text-left border text-xs transition ${
+                      pointMode === 'center'
+                        ? 'border-[#37553A] bg-[#37553A] text-white font-semibold'
+                        : 'border-[#D4E0D5] bg-[#E8F0E8] text-[#263B2B] hover:bg-[#DCE8DD]'
+                    }`}
+                  >
+                    <div className="font-semibold">Torso / Center</div>
+                    <div className="text-[10px] opacity-80">Recommended for doorway cameras</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPointMode('bottom_center')}
+                    className={`p-2 rounded-xl text-left border text-xs transition ${
+                      pointMode === 'bottom_center'
+                        ? 'border-[#37553A] bg-[#37553A] text-white font-semibold'
+                        : 'border-[#D4E0D5] bg-[#E8F0E8] text-[#263B2B] hover:bg-[#DCE8DD]'
+                    }`}
+                  >
+                    <div className="font-semibold">Feet / Ground</div>
+                    <div className="text-[10px] opacity-80">For high ceiling surveillance</div>
+                  </button>
                 </div>
               </div>
 
@@ -380,10 +575,10 @@ export default function VideoProcessing({
                 </label>
                 <div className="grid grid-cols-2 gap-2">
                   {[
-                    { id: 'down', label: 'Downwards (↓)', desc: 'Moving down' },
-                    { id: 'up', label: 'Upwards (↑)', desc: 'Moving up' },
-                    { id: 'right', label: 'Rightwards (→)', desc: 'Moving right' },
-                    { id: 'left', label: 'Leftwards (←)', desc: 'Moving left' },
+                    { id: 'down', label: 'Downwards (↓)' },
+                    { id: 'up', label: 'Upwards (↑)' },
+                    { id: 'right', label: 'Rightwards (→)' },
+                    { id: 'left', label: 'Leftwards (←)' },
                   ].map((dir) => (
                     <button
                       key={dir.id}
@@ -418,6 +613,24 @@ export default function VideoProcessing({
                 />
               </div>
 
+              {/* Debug Annotated Video Option */}
+              <div className="p-3 rounded-xl bg-[#E8F0E8] border border-[#D4E0D5]">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={saveDebugVideo}
+                    onChange={(e) => setSaveDebugVideo(e.target.checked)}
+                    className="accent-[#37553A] w-4 h-4 rounded cursor-pointer"
+                  />
+                  <div className="text-xs">
+                    <span className="font-semibold text-[#263B2B]">Generate Visual Debug Video</span>
+                    <p className="text-[10px] text-[#627466]">
+                      Records bounding boxes, track IDs, threshold line, and crossing markers.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
               {/* Frame Limit (Optional) */}
               <div>
                 <label className="block text-xs font-semibold text-[#263B2B] mb-1.5">
@@ -432,7 +645,7 @@ export default function VideoProcessing({
                 />
               </div>
 
-              {/* Dark Forest Green Start Processing Action */}
+              {/* Start Action Button */}
               <div className="pt-2">
                 {processError && (
                   <div className="mb-3 p-3 rounded-xl bg-[#FDEAE9] border border-[#F5B7B5] text-[#7B2422] text-xs">
@@ -506,20 +719,48 @@ export default function VideoProcessing({
               <p className="text-xs text-[#627466] mt-0.5">
                 YOLOv8 person detector + ByteTrack multi-object tracking engine
               </p>
+              {(videoStatus?.run_id || videoStatus?.video_path) && (
+                <div className="flex flex-wrap items-center gap-2 mt-1.5 text-xs">
+                  {videoStatus?.run_id && (
+                    <span className="px-2 py-0.5 rounded-md font-mono font-semibold bg-[#FFFFFF] text-[#37553A] border border-[#D4E0D5]">
+                      Run #{videoStatus.run_id}
+                    </span>
+                  )}
+                  {videoStatus?.video_path && (
+                    <span className="text-[#627466] font-mono truncate max-w-[280px]" title={videoStatus.video_path}>
+                      Target: {videoStatus.video_path.split(/[\\/]/).pop()}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Stop Button */}
-          {isRunning && (
-            <button
-              onClick={handleStopProcessing}
-              disabled={isStopping || isStoppingState}
-              className="px-4 py-2 rounded-xl bg-[#FDEAE9] hover:bg-[#F9D4D2] text-[#7B2422] border border-[#F5B7B5] text-xs font-semibold flex items-center gap-2 transition disabled:opacity-50"
-            >
-              <Square className="w-3.5 h-3.5 fill-[#7B2422]" />
-              <span>{isStopping || isStoppingState ? 'Stopping...' : 'Stop Processing'}</span>
-            </button>
-          )}
+          <div className="flex items-center gap-2.5">
+            {/* Download Debug Video Button */}
+            {videoStatus?.debug_video_path && (
+              <a
+                href={getDebugVideoUrl(videoStatus.debug_video_path)}
+                download
+                className="px-4 py-2 rounded-xl bg-[#37553A] hover:bg-[#2A422D] text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-2xs"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download Debug Video</span>
+              </a>
+            )}
+
+            {/* Stop Button */}
+            {isRunning && (
+              <button
+                onClick={handleStopProcessing}
+                disabled={isStopping || isStoppingState}
+                className="px-4 py-2 rounded-xl bg-[#FDEAE9] hover:bg-[#F9D4D2] text-[#7B2422] border border-[#F5B7B5] text-xs font-semibold flex items-center gap-2 transition disabled:opacity-50"
+              >
+                <Square className="w-3.5 h-3.5 fill-[#7B2422]" />
+                <span>{isStopping || isStoppingState ? 'Stopping...' : 'Stop Processing'}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Progress Display */}

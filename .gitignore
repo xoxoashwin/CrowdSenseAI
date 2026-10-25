@@ -28,3 +28,6 @@ uploads/
 node_modules/
 dist/
 .DS_Store
+
+# Temporary scratch files
+scratch/

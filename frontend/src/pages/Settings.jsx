@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Settings as SettingsIcon,
   Server,
@@ -38,6 +38,17 @@ export default function Settings({
   const [isResetting, setIsResetting] = useState(false);
   const [feedback, setFeedback] = useState(null);
 
+  const isMountedRef = useRef(true);
+  const capacityTimerRef = useRef(null);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (capacityTimerRef.current) clearTimeout(capacityTimerRef.current);
+    };
+  }, []);
+
   // Save venue capacity
   const handleSaveCapacity = (e) => {
     e.preventDefault();
@@ -55,7 +66,10 @@ export default function Settings({
     }
 
     setCapacitySaved(true);
-    setTimeout(() => setCapacitySaved(false), 4000);
+    if (capacityTimerRef.current) clearTimeout(capacityTimerRef.current);
+    capacityTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) setCapacitySaved(false);
+    }, 4000);
   };
 
   // Reset capacity to default (100)
@@ -66,26 +80,35 @@ export default function Settings({
       onUpdateVenueCapacity(100);
     }
     setCapacitySaved(true);
-    setTimeout(() => setCapacitySaved(false), 4000);
+    if (capacityTimerRef.current) clearTimeout(capacityTimerRef.current);
+    capacityTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) setCapacitySaved(false);
+    }, 4000);
   };
 
   const handleConfirmReset = async () => {
     try {
       setIsResetting(true);
       const res = await resetCounters(clearHistory);
-      setFeedback({
-        type: 'success',
-        message: res.message || 'Venue statistics and counters reset successfully.',
-      });
-      setIsModalOpen(false);
-      if (onRefresh) onRefresh();
+      if (isMountedRef.current) {
+        setFeedback({
+          type: 'success',
+          message: res.message || 'Venue statistics and counters reset successfully.',
+        });
+        setIsModalOpen(false);
+        if (onRefresh) onRefresh();
+      }
     } catch (err) {
-      setFeedback({
-        type: 'error',
-        message: err.message || 'Failed to reset statistics.',
-      });
+      if (isMountedRef.current) {
+        setFeedback({
+          type: 'error',
+          message: err.message || 'Failed to reset statistics.',
+        });
+      }
     } finally {
-      setIsResetting(false);
+      if (isMountedRef.current) {
+        setIsResetting(false);
+      }
     }
   };
 

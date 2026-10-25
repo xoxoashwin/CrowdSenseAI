@@ -1,14 +1,24 @@
 import React from 'react';
-import { AlertTriangle, Terminal, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Terminal, RefreshCw, WifiOff } from 'lucide-react';
 import { API_BASE_URL } from '../api';
 
-export default function BackendAlertBanner({ onRetry, isChecking }) {
+/**
+ * BackendAlertBanner
+ * Renders an alert notification when the FastAPI backend server is unreachable.
+ * Automatically hides when isConnected is true.
+ */
+export default function BackendAlertBanner({ isConnected, onRetry, isChecking }) {
+  // If connection is verified, render nothing
+  if (isConnected) {
+    return null;
+  }
+
   return (
-    <div className="mb-6 p-4 rounded-xl border border-[#F5B7B5] bg-[#FDEAE9] text-[#7B2422] shadow-2xs">
+    <div className="mb-6 p-4 rounded-xl border border-[#F5B7B5] bg-[#FDEAE9] text-[#7B2422] shadow-2xs animate-in fade-in">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-start gap-3">
-          <div className="p-2 rounded-lg bg-[#F9D4D2] text-[#7B2422] mt-0.5">
-            <AlertTriangle className="w-5 h-5" />
+          <div className="p-2 rounded-lg bg-[#F9D4D2] text-[#7B2422] mt-0.5 shrink-0">
+            <WifiOff className="w-5 h-5 text-[#C2413E]" />
           </div>
           <div>
             <h4 className="text-sm font-bold text-[#641A19]">Backend Server Disconnected</h4>
@@ -24,12 +34,13 @@ export default function BackendAlertBanner({ onRetry, isChecking }) {
         </div>
         <div className="flex items-center gap-2 self-end md:self-center">
           <button
+            type="button"
             onClick={onRetry}
             disabled={isChecking}
-            className="flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-[#37553A] hover:bg-[#2A422D] text-white shadow-2xs transition disabled:opacity-50"
+            className="flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-[#37553A] hover:bg-[#2A422D] text-white shadow-2xs transition disabled:opacity-50 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isChecking ? 'animate-spin' : ''}`} />
-            <span>Retry Connection</span>
+            <span>{isChecking ? 'Connecting...' : 'Retry Connection'}</span>
           </button>
         </div>
       </div>

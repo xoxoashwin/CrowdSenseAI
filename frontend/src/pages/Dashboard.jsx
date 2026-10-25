@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Users,
   UserPlus,
@@ -30,18 +30,37 @@ export default function Dashboard({
 }) {
   const [isActionLoading, setIsActionLoading] = useState(false);
   const [actionMessage, setActionMessage] = useState(null);
+  const messageTimeoutRef = useRef(null);
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+    };
+  }, []);
 
   const handleQuickEntry = async () => {
     try {
       setIsActionLoading(true);
       const res = await recordEntry({ count: 1, note: 'Meeting Hall Manual Entry' });
-      setActionMessage({ text: res.message, type: 'success' });
-      if (onRefresh) onRefresh();
+      if (isMountedRef.current) {
+        setActionMessage({ text: res.message, type: 'success' });
+        if (onRefresh) onRefresh();
+      }
     } catch (err) {
-      setActionMessage({ text: err.message, type: 'error' });
+      if (isMountedRef.current) {
+        setActionMessage({ text: err.message, type: 'error' });
+      }
     } finally {
-      setIsActionLoading(false);
-      setTimeout(() => setActionMessage(null), 4000);
+      if (isMountedRef.current) {
+        setIsActionLoading(false);
+        if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+        messageTimeoutRef.current = setTimeout(() => {
+          if (isMountedRef.current) setActionMessage(null);
+        }, 4000);
+      }
     }
   };
 
@@ -49,13 +68,22 @@ export default function Dashboard({
     try {
       setIsActionLoading(true);
       const res = await recordExit({ count: 1, note: 'Meeting Hall Manual Exit' });
-      setActionMessage({ text: res.message, type: 'success' });
-      if (onRefresh) onRefresh();
+      if (isMountedRef.current) {
+        setActionMessage({ text: res.message, type: 'success' });
+        if (onRefresh) onRefresh();
+      }
     } catch (err) {
-      setActionMessage({ text: err.message, type: 'error' });
+      if (isMountedRef.current) {
+        setActionMessage({ text: err.message, type: 'error' });
+      }
     } finally {
-      setIsActionLoading(false);
-      setTimeout(() => setActionMessage(null), 4000);
+      if (isMountedRef.current) {
+        setIsActionLoading(false);
+        if (messageTimeoutRef.current) clearTimeout(messageTimeoutRef.current);
+        messageTimeoutRef.current = setTimeout(() => {
+          if (isMountedRef.current) setActionMessage(null);
+        }, 4000);
+      }
     }
   };
 
@@ -161,138 +189,134 @@ export default function Dashboard({
           </div>
           <button
             onClick={() => onNavigate && onNavigate('video')}
-            className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-[#37553A] hover:bg-[#2A422D] text-white transition flex items-center gap-1.5 shadow-2xs"
+            className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-[#37553A] hover:bg-[#263B2B] text-white transition shadow-xs"
           >
-            <span>Monitor Job</span>
-            <ArrowUpRight className="w-3.5 h-3.5" />
+            View Live Stream
           </button>
         </div>
       )}
 
-      {/* Primary KPI Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Live Occupancy Metric Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
         <StatCard
-          title="Current Occupancy"
-          value={stats ? currentOccupancy : isConnected ? 0 : '--'}
-          subtitle={`${occupancyPercentage.toFixed(1)}% of ${safeCapacity} seats`}
+          title="Current Headcount"
+          value={stats ? stats.current_occupancy : '--'}
+          subtitle={`Capacity Limit: ${safeCapacity}`}
           icon={Users}
-          variant="forest"
-          badge={
-            isOverCapacity
-              ? 'Over Capacity'
-              : isAtCapacity
-              ? 'At Capacity'
-              : isWarningThreshold
-              ? '80% Warning'
-              : 'Normal'
-          }
-          badgeType={
-            isAtCapacity
-              ? 'danger'
-              : isWarningThreshold
-              ? 'warning'
-              : 'neutral'
-          }
+          color="green"
+          badge={stats ? stats.status : 'Connecting'}
         />
         <StatCard
-          title="Total Meeting Entries"
-          value={stats ? stats.total_entries : isConnected ? 0 : '--'}
-          subtitle="Cumulative attendees arrived"
+          title="Total Inflow (Entries)"
+          value={stats ? stats.total_entries : '--'}
+          subtitle="Cumulative verified arrivals"
           icon={UserPlus}
-          variant="accent"
+          color="emerald"
         />
         <StatCard
-          title="Total Meeting Exits"
-          value={stats ? stats.total_exits : isConnected ? 0 : '--'}
-          subtitle="Cumulative departures recorded"
+          title="Total Outflow (Exits)"
+          value={stats ? stats.total_exits : '--'}
+          subtitle="Cumulative verified departures"
           icon={UserMinus}
-          variant="sage"
+          color="teal"
         />
         <StatCard
-          title="Peak Concurrency"
-          value={stats ? stats.peak_occupancy : isConnected ? 0 : '--'}
-          subtitle="Highest headcount this session"
+          title="Peak Attendance"
+          value={stats ? stats.peak_occupancy : '--'}
+          subtitle="Highest headcount recorded"
           icon={TrendingUp}
-          variant="forest"
+          color="amber"
         />
       </div>
 
-      {/* Middle Row: Capacity Gauge + Quick Controls */}
+      {/* Real-time Visualizations & Doorway Actions */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2">
+        {/* Capacity Gauge Meter */}
+        <div className="lg:col-span-1">
           <CapacityGauge
-            current={currentOccupancy}
+            current={stats?.current_occupancy ?? 0}
             capacity={safeCapacity}
-            percentage={occupancyPercentage}
-            status={stats?.status ?? 'Normal'}
+            status={stats?.status || 'Normal'}
             peak={stats?.peak_occupancy ?? 0}
           />
         </div>
 
-        {/* Quick Door Counter Controls */}
-        <div className="bg-[#F7FAF6] rounded-2xl p-6 border border-[#D4E0D5] shadow-forest-card flex flex-col justify-between">
+        {/* Quick Doorway Action Card */}
+        <div className="lg:col-span-2 bg-[#F7FAF6] rounded-2xl p-6 border border-[#D4E0D5] shadow-forest-card flex flex-col justify-between">
           <div>
-            <div className="flex items-center gap-2 mb-1">
-              <Sparkles className="w-4 h-4 text-[#37553A]" />
-              <h3 className="text-sm font-bold text-[#263B2B]">Door Counter Controls</h3>
+            <div className="flex items-center justify-between pb-4 border-b border-[#D4E0D5]">
+              <div>
+                <h3 className="text-base font-bold text-[#263B2B]">Doorway Steward Control</h3>
+                <p className="text-xs text-[#627466] mt-0.5">
+                  Direct manual overrides for venue door marshals and security personnel.
+                </p>
+              </div>
+              <span className="text-xs font-mono text-[#627466] flex items-center gap-1.5 bg-[#E8F0E8] px-2.5 py-1 rounded-full border border-[#D4E0D5]">
+                <Activity className="w-3.5 h-3.5 text-[#37553A]" />
+                Live Sync
+              </span>
             </div>
-            <p className="text-xs text-[#627466]">
-              Manual gate overrides to record arrivals and departures into the SQLite database.
-            </p>
 
-            <div className="mt-5 grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
               <button
+                type="button"
                 onClick={handleQuickEntry}
-                disabled={!isConnected || isActionLoading}
-                className="flex flex-col items-center justify-center p-4 rounded-xl bg-[#DCE8DD] hover:bg-[#C8DBC9] border border-[#D4E0D5] text-[#263B2B] font-semibold text-sm transition shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed group"
+                disabled={isActionLoading || !isConnected}
+                className="group relative flex flex-col items-center justify-center p-6 rounded-xl border-2 border-dashed border-[#AEC3B0] bg-[#E8F0E8]/50 hover:bg-[#DCE8DD] hover:border-[#37553A] transition active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
-                <div className="p-2 rounded-lg bg-[#37553A] text-white mb-2 group-hover:scale-105 transition shadow-2xs">
-                  <UserPlus className="w-5 h-5" />
+                <div className="w-12 h-12 rounded-full bg-[#37553A] text-white flex items-center justify-center mb-3 group-hover:scale-110 transition shadow-xs">
+                  <UserPlus className="w-6 h-6" />
                 </div>
-                <span>+1 Entry</span>
-                <span className="text-[10px] text-[#627466] font-normal mt-0.5">Attendee enters</span>
+                <span className="text-sm font-bold text-[#263B2B]">Record Inward Arrival (+1)</span>
+                <span className="text-xs text-[#627466] mt-1 text-center">
+                  Person entered main auditorium
+                </span>
               </button>
 
               <button
+                type="button"
                 onClick={handleQuickExit}
-                disabled={!isConnected || isActionLoading}
-                className="flex flex-col items-center justify-center p-4 rounded-xl bg-[#DCE8DD] hover:bg-[#C8DBC9] border border-[#D4E0D5] text-[#263B2B] font-semibold text-sm transition shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed group"
+                disabled={isActionLoading || !isConnected}
+                className="group relative flex flex-col items-center justify-center p-6 rounded-xl border-2 border-dashed border-[#CBD5E1] bg-[#F1F5F9]/50 hover:bg-[#E2E8F0] hover:border-[#64748B] transition active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
-                <div className="p-2 rounded-lg bg-[#6B9071] text-white mb-2 group-hover:scale-105 transition shadow-2xs">
-                  <UserMinus className="w-5 h-5" />
+                <div className="w-12 h-12 rounded-full bg-[#64748B] text-white flex items-center justify-center mb-3 group-hover:scale-110 transition shadow-xs">
+                  <UserMinus className="w-6 h-6" />
                 </div>
-                <span>-1 Exit</span>
-                <span className="text-[10px] text-[#627466] font-normal mt-0.5">Attendee departs</span>
+                <span className="text-sm font-bold text-[#1E293B]">Record Outward Departure (-1)</span>
+                <span className="text-xs text-[#64748B] mt-1 text-center">
+                  Person exited meeting hall
+                </span>
               </button>
             </div>
           </div>
 
-          <div className="mt-5 pt-4 border-t border-[#D4E0D5] flex items-center justify-between text-xs text-[#627466]">
-            <span>Video Ingestion</span>
+          <div className="pt-4 border-t border-[#D4E0D5] flex items-center justify-between text-xs text-[#627466]">
+            <span>Events are immediately persisted to local SQLite database</span>
             <button
-              onClick={() => onNavigate && onNavigate('video')}
-              className="text-[#37553A] hover:text-[#2A422D] font-bold flex items-center gap-1"
+              onClick={() => onNavigate && onNavigate('events')}
+              className="text-[#37553A] font-semibold hover:underline flex items-center gap-1"
             >
-              Analyze Footage
+              Audit Log
               <ArrowUpRight className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Bottom Section: Recent Events Log Preview */}
+      {/* Recent Activity Audit Table */}
       <div className="bg-[#F7FAF6] rounded-2xl p-6 border border-[#D4E0D5] shadow-forest-card">
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-2.5">
-            <Activity className="w-4 h-4 text-[#37553A]" />
-            <h3 className="text-base font-bold text-[#263B2B]">Recent Gathering Activity Log</h3>
-            <span className="text-xs text-[#627466] font-mono">({recentEvents.length} records)</span>
+        <div className="flex items-center justify-between pb-4 border-b border-[#D4E0D5] mb-4">
+          <div>
+            <h3 className="text-base font-bold text-[#263B2B]">Live Footfall Audit Feed</h3>
+            <p className="text-xs text-[#627466] mt-0.5">
+              Verified computer-vision doorway crossing events and manual steward adjustments.
+            </p>
           </div>
           <button
             onClick={() => onNavigate && onNavigate('events')}
-            className="text-xs font-semibold text-[#37553A] hover:text-[#2A422D] transition flex items-center gap-1"
+            className="text-xs font-semibold text-[#37553A] hover:underline flex items-center gap-1"
           >
-            <span>View Full Log</span>
+            View Complete Trail
             <ArrowUpRight className="w-3.5 h-3.5" />
           </button>
         </div>
