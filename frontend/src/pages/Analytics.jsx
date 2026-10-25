@@ -41,19 +41,17 @@ export default function Analytics({ events = [], stats, isConnected, isChecking,
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
 
-    let runningOccupancy = 0;
     let totalEntries = 0;
     let totalExits = 0;
 
     const timeline = chronological.map((evt, idx) => {
       const isEntry = evt.event_type.toLowerCase() === 'entry';
       if (isEntry) {
-        runningOccupancy += evt.count;
         totalEntries += evt.count;
       } else {
-        runningOccupancy = Math.max(0, runningOccupancy - evt.count);
         totalExits += evt.count;
       }
+      const runningOccupancy = Math.max(0, totalEntries - totalExits);
 
       const dateObj = new Date(evt.timestamp);
       const timeLabel = !isNaN(dateObj.getTime())
@@ -99,7 +97,7 @@ export default function Analytics({ events = [], stats, isConnected, isChecking,
       { name: 'Departures', value: totalExits, color: '#6B9071' },
     ];
 
-    const netFlow = totalEntries - totalExits;
+    const netFlow = Math.max(0, totalEntries - totalExits);
     const avgBatch = (totalEntries + totalExits) / (events.length || 1);
 
     return {

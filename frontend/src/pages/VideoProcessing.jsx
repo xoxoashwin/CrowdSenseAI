@@ -231,17 +231,22 @@ export default function VideoProcessing({
 
       // Immediately reset run metrics in the UI so previous video run results don't linger
       if (isMountedRef.current) {
-        setVideoStatus((prev) => ({
-          ...(prev || {}),
-          status: 'running',
-          video_path: targetVideoPath,
-          total_frames: 0,
-          processed_frames: 0,
-          progress_percentage: 0,
-          entries_detected: 0,
-          exits_detected: 0,
-          current_fps: 0,
-        }));
+        setVideoStatus((prev) => {
+          const startOcc = prev?.stats?.current_occupancy ?? 0;
+          return {
+            ...(prev || {}),
+            status: 'running',
+            video_path: targetVideoPath,
+            total_frames: 0,
+            processed_frames: 0,
+            progress_percentage: 0,
+            entries_detected: 0,
+            exits_detected: 0,
+            starting_occupancy: startOcc,
+            run_occupancy: startOcc,
+            current_fps: 0,
+          };
+        });
       }
 
       const params = {
@@ -494,11 +499,12 @@ export default function VideoProcessing({
                 </div>
 
                 {/* Presets */}
-                <div className="grid grid-cols-3 gap-2 mb-2">
+                <div className="grid grid-cols-4 gap-2 mb-2">
                   {[
-                    { id: 0.1, label: 'Top Gate (0.1)' },
+                    { id: 0.1, label: 'Top (0.1)' },
+                    { id: 0.38, label: 'Door (0.38)' },
                     { id: 0.5, label: 'Center (0.5)' },
-                    { id: 0.9, label: 'Bottom (0.9)' },
+                    { id: 0.9, label: 'Floor (0.9)' },
                   ].map((pos) => (
                     <button
                       key={pos.id}
@@ -821,7 +827,12 @@ export default function VideoProcessing({
                   <span>Live Headcount</span>
                 </div>
                 <p className="text-lg font-bold text-[#263B2B] font-mono mt-1">
-                  {videoStatus.stats ? videoStatus.stats.current_occupancy : '--'}
+                  {typeof videoStatus.run_occupancy === 'number'
+                    ? videoStatus.run_occupancy
+                    : videoStatus.stats ? videoStatus.stats.current_occupancy : '--'}
+                </p>
+                <p className="text-[10px] text-[#627466] mt-0.5 font-mono">
+                  Starting: {videoStatus.starting_occupancy ?? (videoStatus.stats?.current_occupancy ?? 0)}
                 </p>
               </div>
             </div>

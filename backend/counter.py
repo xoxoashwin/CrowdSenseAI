@@ -10,6 +10,8 @@ from backend import database
 class OccupancyCounter:
     """
     Tracks real-time occupancy, entries, exits, and peak occupancy for a venue.
+    Guarantees the invariant:
+        current_occupancy = max(0, total_entries - total_exits)
     """
 
     def __init__(
@@ -22,7 +24,7 @@ class OccupancyCounter:
             raise ValueError("Capacity must be greater than zero.")
         self.capacity: int = capacity
         self.db_path: str = db_path
-        self.current_occupancy: int = 0
+        self._current_occupancy: int = 0
         self.total_entries: int = 0
         self.total_exits: int = 0
         self.peak_occupancy: int = 0
@@ -33,6 +35,34 @@ class OccupancyCounter:
         if auto_restore:
             self.restore_state()
 
+    @property
+    def current_occupancy(self) -> int:
+        """
+        Current headcount is calculated consistently:
+        current_occupancy = max(0, total_entries - total_exits)
+        """
+        return max(0, self.total_entries - self.total_exits)
+
+    @current_occupancy.setter
+    def current_occupancy(self, value: int) -> None:
+        self._current_occupancy = value
+
+    @property
+    def available_spaces(self) -> int:
+        """
+        Remaining available spaces: max(0, capacity - current_occupancy).
+        """
+        return max(0, self.capacity - self.current_occupancy)
+
+    @property
+    def capacity_percentage(self) -> float:
+        """
+        Calculates occupancy percentage relative to capacity, rounded to 1 decimal place.
+        """
+        if self.capacity <= 0:
+            return 0.0
+        pct = (self.current_occupancy / self.capacity) * 100.0
+        return round(pct, 1)
 
     def record_entry(self, count: int = 1, note: Optional[str] = None, persist: bool = True) -> int:
         """
@@ -47,7 +77,6 @@ class OccupancyCounter:
             raise ValueError("Entry count must be positive.")
 
         self.total_entries += count
-        self.current_occupancy += count
 
         if self.current_occupancy > self.peak_occupancy:
             self.peak_occupancy = self.current_occupancy
@@ -66,7 +95,7 @@ class OccupancyCounter:
     def record_exit(self, count: int = 1, note: Optional[str] = None, persist: bool = True) -> int:
         """
         Decrements occupancy and increments total exits.
-        Crucial requirement: Prevents current_occupancy from ever becoming negative.
+        Guarantees that current_occupancy is never negative.
         Optionally persists the event to SQLite.
 
         Returns:
@@ -76,12 +105,6 @@ class OccupancyCounter:
             raise ValueError("Exit count must be positive.")
 
         self.total_exits += count
-
-        # Prevent occupancy from dropping below 0
-        if self.current_occupancy - count < 0:
-            self.current_occupancy = 0
-        else:
-            self.current_occupancy -= count
 
         event_id = 0
         if persist:
@@ -93,16 +116,6 @@ class OccupancyCounter:
             )
 
         return event_id
-
-    @property
-    def capacity_percentage(self) -> float:
-        """
-        Calculates occupancy percentage relative to capacity, rounded to 1 decimal place.
-        """
-        if self.capacity <= 0:
-            return 0.0
-        pct = (self.current_occupancy / self.capacity) * 100.0
-        return round(pct, 1)
 
     def get_status(self) -> str:
         """
@@ -132,19 +145,20 @@ class OccupancyCounter:
             "capacity": self.capacity,
             "capacity_percentage": self.capacity_percentage,
             "status": self.get_status(),
+            "available_spaces": self.available_spaces,
         }
 
     def restore_state(self) -> Dict[str, Any]:
         """
         Reconstructs occupancy and session totals from SQLite events recorded
         since the most recent reset boundary.
-        Replays events in chronological order, respecting non-negative occupancy clamping
-        and tracking peak occupancy accurately.
+        Replays events in chronological order, calculating occupancy strictly
+        via the invariant: current_occupancy = max(0, total_entries - total_exits),
+        while accurately computing the peak occupancy achieved.
         """
         last_event_id = database.get_last_reset_event_id(self.db_path)
         events = database.get_events_since(last_event_id=last_event_id, db_path=self.db_path)
 
-        self.current_occupancy = 0
         self.total_entries = 0
         self.total_exits = 0
         self.peak_occupancy = 0
@@ -154,15 +168,12 @@ class OccupancyCounter:
             count = int(event["count"])
             if etype == "entry":
                 self.total_entries += count
-                self.current_occupancy += count
-                if self.current_occupancy > self.peak_occupancy:
-                    self.peak_occupancy = self.current_occupancy
             elif etype == "exit":
                 self.total_exits += count
-                if self.current_occupancy - count < 0:
-                    self.current_occupancy = 0
-                else:
-                    self.current_occupancy -= count
+
+            occ = max(0, self.total_entries - self.total_exits)
+            if occ > self.peak_occupancy:
+                self.peak_occupancy = occ
 
         return self.get_stats()
 
@@ -173,13 +184,12 @@ class OccupancyCounter:
         If clear_db is False, records a reset boundary in SQLite so historical events
         are preserved for audit logs without being replayed as active occupancy on restart.
         """
-        self.current_occupancy = 0
         self.total_entries = 0
         self.total_exits = 0
         self.peak_occupancy = 0
+        self._current_occupancy = 0
 
         if clear_db:
             database.clear_events(self.db_path)
         else:
             database.record_reset(db_path=self.db_path, note="session_reset")
-

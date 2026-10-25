@@ -21,6 +21,7 @@ class StatsResponse(BaseModel):
     capacity: int = Field(..., ge=1, description="Maximum venue capacity")
     capacity_percentage: float = Field(..., ge=0.0, description="Current occupancy as a percentage of capacity")
     status: str = Field(..., description="Descriptive status (e.g. Normal, Moderate, Near Capacity, At Capacity)")
+    available_spaces: Optional[int] = Field(None, description="Number of remaining available spaces in venue")
 
 
 class EventTriggerRequest(BaseModel):
@@ -72,6 +73,8 @@ class VideoProcessStatusResponse(BaseModel):
     progress_percentage: float = Field(0.0, description="Completion percentage")
     entries_detected: int = Field(0, description="Total entries detected in this video run")
     exits_detected: int = Field(0, description="Total exits detected in this video run")
+    starting_occupancy: Optional[int] = Field(0, description="Occupancy before this video run started")
+    run_occupancy: Optional[int] = Field(0, description="Calculated live occupancy for this run: max(0, starting_occupancy + entries - exits)")
     current_fps: float = Field(0.0, description="Current processing speed in FPS")
     error_message: Optional[str] = Field(None, description="Error details if job failed")
     debug_video_path: Optional[str] = Field(None, description="Path to generated debug video if requested")

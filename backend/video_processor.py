@@ -20,6 +20,11 @@ import numpy as np
 from backend.counter import OccupancyCounter
 
 logger = logging.getLogger("crowdsense.video")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
 
 
 @dataclass
@@ -30,7 +35,7 @@ class VirtualLine:
     """
     pt1: Tuple[int, int]
     pt2: Tuple[int, int]
-    margin: float = 6.0
+    margin: float = 4.0
 
     @property
     def length(self) -> float:
@@ -93,7 +98,10 @@ class VirtualLine:
         if (dist1 > 0 and dist2 < 0) or (dist1 < 0 and dist2 > 0):
             min_x = min(self.pt1[0], self.pt2[0]) - self.margin
             max_x = max(self.pt1[0], self.pt2[0]) + self.margin
-            if (min_x <= p1[0] <= max_x) or (min_x <= p2[0] <= max_x):
+            min_y = min(self.pt1[1], self.pt2[1]) - self.margin
+            max_y = max(self.pt1[1], self.pt2[1]) + self.margin
+            if (min_x <= p1[0] <= max_x or min_x <= p2[0] <= max_x) and \
+               (min_y <= p1[1] <= max_y or min_y <= p2[1] <= max_y):
                 return True
 
         return False
@@ -107,8 +115,11 @@ class TrackState:
     last_position: Optional[Tuple[float, float]] = None
     last_count_frame: int = -9999
     last_event_type: Optional[str] = None
-    history: deque = field(default_factory=lambda: deque(maxlen=30))
+    history: deque = field(default_factory=lambda: deque(maxlen=40))
     counted_crossings: int = 0
+    first_seen_frame: int = 0
+    last_seen_frame: int = 0
+    stitched_from: Optional[int] = None
 
 
 class LineCrossingCounter:
@@ -116,6 +127,7 @@ class LineCrossingCounter:
     Detects directional line crossings from tracked object trajectories.
     Prevents duplicate counts through debounce windows, hysteresis deadzones,
     and state-transition locks.
+    Supports trajectory stitching across brief ByteTrack dropouts.
     """
 
     def __init__(
@@ -125,34 +137,25 @@ class LineCrossingCounter:
         debounce_frames: int = 15,
         counter: Optional[OccupancyCounter] = None,
         point_mode: str = "center",
+        run_id: Optional[str] = None,
     ):
-        """
-        Args:
-            line: VirtualLine defining the crossing threshold.
-            entry_direction: Direction defining an entry:
-                - "down": moving downward (increasing Y) is entry, upward is exit.
-                - "up": moving upward (decreasing Y) is entry, downward is exit.
-                - "right": moving rightward (increasing X) is entry, leftward is exit.
-                - "left": moving leftward (decreasing X) is entry, rightward is exit.
-                - "positive": crossing from side -1 to +1 is entry.
-                - "negative": crossing from side +1 to -1 is entry.
-            debounce_frames: Minimum frame gap required before the same track ID can be counted again.
-            counter: Optional OccupancyCounter to directly record entry/exit events.
-            point_mode: Detection anchor: 'center' (bbox centroid) or 'bottom_center' (feet position).
-        """
         self.line = line
         self.entry_direction = entry_direction.lower()
         self.debounce_frames = debounce_frames
         self.counter = counter
         self.point_mode = point_mode
+        self.run_id = run_id or f"run_{uuid.uuid4().hex[:6]}"
 
         self.tracks: Dict[int, TrackState] = {}
         self.total_entries: int = 0
         self.total_exits: int = 0
         self.crossing_events: List[Dict[str, Any]] = []
 
+        # Buffer of recently lost tracks for track-ID continuity / recovery
+        self.recent_lost_tracks: deque = deque(maxlen=30)
+
     def _get_anchor_point(self, bbox: Tuple[float, float, float, float]) -> Tuple[float, float]:
-        """Calculates either centroid or bottom-center (ground plane/feet) from bbox."""
+        """Calculates either centroid or bottom-center (feet position) from bbox."""
         x1, y1, x2, y2 = bbox
         cx = (x1 + x2) / 2.0
         if self.point_mode == "bottom_center":
@@ -170,6 +173,7 @@ class LineCrossingCounter:
     ) -> Optional[str]:
         """
         Evaluates whether a side transition corresponds to an 'entry' or 'exit'.
+        Uses movement displacement vector dotted with the target direction.
         """
         dx = curr_pos[0] - prev_pos[0]
         dy = curr_pos[1] - prev_pos[1]
@@ -182,7 +186,7 @@ class LineCrossingCounter:
                 return "exit"
             elif dy > 0:
                 return "entry"
-            else:
+            elif dy < 0:
                 return "exit"
 
         elif self.entry_direction == "up":
@@ -193,7 +197,7 @@ class LineCrossingCounter:
                 return "exit"
             elif dy < 0:
                 return "entry"
-            else:
+            elif dy > 0:
                 return "exit"
 
         elif self.entry_direction == "right":
@@ -204,7 +208,7 @@ class LineCrossingCounter:
                 return "exit"
             elif dx > 0:
                 return "entry"
-            else:
+            elif dx < 0:
                 return "exit"
 
         elif self.entry_direction == "left":
@@ -215,7 +219,7 @@ class LineCrossingCounter:
                 return "exit"
             elif dx < 0:
                 return "entry"
-            else:
+            elif dx > 0:
                 return "exit"
 
         elif self.entry_direction == "positive":
@@ -230,6 +234,31 @@ class LineCrossingCounter:
             elif prev_side == -1 and curr_side == 1:
                 return "exit"
 
+        return None
+
+    def _find_matching_lost_track(
+        self,
+        curr_pos: Tuple[float, float],
+        curr_side: int,
+        frame_idx: int,
+        max_dist: float = 80.0,
+        max_frame_gap: int = 25,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Recovers tracking continuity across temporary occlusions and tracker ID switches.
+        Matches an appearing track with a recently lost track that was on the opposite side of the line.
+        """
+        for lost in reversed(self.recent_lost_tracks):
+            if lost.get("matched", False):
+                continue
+            if frame_idx - lost["frame_idx"] > max_frame_gap:
+                continue
+
+            # Must have been on opposite side or heading across
+            if lost["side"] != 0 and curr_side != 0 and lost["side"] != curr_side:
+                dist = math.hypot(curr_pos[0] - lost["pos"][0], curr_pos[1] - lost["pos"][1])
+                if dist <= max_dist:
+                    return lost
         return None
 
     def update(
@@ -250,41 +279,76 @@ class LineCrossingCounter:
 
         curr_pos = self._get_anchor_point(bbox)
         curr_side = self.line.side_of_line(curr_pos)
+        dist_to_line = self.line.signed_distance(curr_pos)
 
+        # Check if new track ID should be stitched from a recently lost track
         if track_id not in self.tracks:
-            self.tracks[track_id] = TrackState(
-                track_id=track_id,
-                last_known_side=curr_side if curr_side != 0 else 0,
-                last_position=curr_pos,
-                last_count_frame=-9999,
-            )
-            self.tracks[track_id].history.append(curr_pos)
-            return None
+            matched_lost = self._find_matching_lost_track(curr_pos, curr_side, frame_idx)
+            if matched_lost:
+                matched_lost["matched"] = True
+                stitched_id = matched_lost["track_id"]
+                prev_pos = matched_lost["pos"]
+                prev_side = matched_lost["side"]
+                logger.info(
+                    "[%s] Track stitching: New Track ID %d stitched with lost Track ID %d (gap=%d frames, dist=%.1fpx)",
+                    self.run_id, track_id, stitched_id, frame_idx - matched_lost["frame_idx"],
+                    math.hypot(curr_pos[0] - prev_pos[0], curr_pos[1] - prev_pos[1]),
+                )
+                state = TrackState(
+                    track_id=track_id,
+                    last_known_side=prev_side,
+                    last_position=prev_pos,
+                    last_count_frame=matched_lost.get("last_count_frame", -9999),
+                    first_seen_frame=frame_idx,
+                    last_seen_frame=frame_idx,
+                    stitched_from=stitched_id,
+                )
+                state.history.append(prev_pos)
+                state.history.append(curr_pos)
+                self.tracks[track_id] = state
+            else:
+                self.tracks[track_id] = TrackState(
+                    track_id=track_id,
+                    last_known_side=curr_side if curr_side != 0 else 0,
+                    last_position=curr_pos,
+                    last_count_frame=-9999,
+                    first_seen_frame=frame_idx,
+                    last_seen_frame=frame_idx,
+                )
+                self.tracks[track_id].history.append(curr_pos)
+                return None
 
         state = self.tracks[track_id]
         prev_pos = state.last_position or curr_pos
         state.history.append(curr_pos)
         state.last_position = curr_pos
+        state.last_seen_frame = frame_idx
 
-        # If point is currently within the deadzone, keep the last known side and do not count
+        # If point is currently within the deadzone, keep history and return
         if curr_side == 0:
             return None
 
-        # Check if the object transitioned across the line
+        # Determine prior side
         prev_side = state.last_known_side
         if prev_side == 0:
-            # Track was first observed inside the deadzone. Check if it crossed from its initial position
-            init_dist = self.line.signed_distance(state.history[0])
-            if (init_dist < -1e-4 and curr_side == 1) or (init_dist > 1e-4 and curr_side == -1):
-                prev_side = -1 if init_dist < 0 else 1
+            # Track was first observed inside the deadzone. Check movement from initial position
+            if len(state.history) > 1:
+                init_dist = self.line.signed_distance(state.history[0])
+                if (init_dist < -1e-4 and curr_side == 1) or (init_dist > 1e-4 and curr_side == -1):
+                    prev_side = -1 if init_dist < 0 else 1
+                else:
+                    state.last_known_side = curr_side
+                    return None
             else:
                 state.last_known_side = curr_side
                 return None
 
         event_type: Optional[str] = None
-        if prev_side != curr_side:
-            # Check debounce frames to prevent repeated counts from jitter
-            if (frame_idx - state.last_count_frame) >= self.debounce_frames:
+        has_crossed = (prev_side != curr_side) or self.line.intersects_segment(prev_pos, curr_pos)
+
+        if has_crossed:
+            frames_since_count = frame_idx - state.last_count_frame
+            if frames_since_count >= self.debounce_frames:
                 event_type = self._determine_event_type(prev_side, curr_side, prev_pos, curr_pos)
 
                 if event_type is not None:
@@ -293,11 +357,11 @@ class LineCrossingCounter:
                     state.last_event_type = event_type
                     state.counted_crossings += 1
 
-                    # Update internal counts
+                    event_id = 0
                     if event_type == "entry":
                         self.total_entries += 1
                         if self.counter is not None:
-                            self.counter.record_entry(
+                            event_id = self.counter.record_entry(
                                 count=1,
                                 note=f"video_track_id_{track_id}",
                                 persist=True,
@@ -305,7 +369,7 @@ class LineCrossingCounter:
                     elif event_type == "exit":
                         self.total_exits += 1
                         if self.counter is not None:
-                            self.counter.record_exit(
+                            event_id = self.counter.record_exit(
                                 count=1,
                                 note=f"video_track_id_{track_id}",
                                 persist=True,
@@ -317,16 +381,44 @@ class LineCrossingCounter:
                         "frame_idx": frame_idx,
                         "position": curr_pos,
                         "timestamp": timestamp or time.time(),
+                        "event_id": event_id,
                     })
 
-                # Update side after crossing check only when debounce has elapsed
-                state.last_known_side = curr_side
+                    logger.info(
+                        "[%s] [CROSSING ACCEPTED] Frame %d: Track ID %d crossed line (side %d -> %d, %s) | pos=(%.1f, %.1f), dist=%.1f | Run Entries=%d, Run Exits=%d | DB Event ID #%d",
+                        self.run_id, frame_idx, track_id, prev_side, curr_side, event_type.upper(),
+                        curr_pos[0], curr_pos[1], dist_to_line,
+                        self.total_entries, self.total_exits, event_id,
+                    )
+                    state.last_known_side = curr_side
+            else:
+                logger.debug(
+                    "[%s] [CROSSING REJECTED] Frame %d: Track ID %d crossing rejected due to debounce (%d < %d frames)",
+                    self.run_id, frame_idx, track_id, frames_since_count, self.debounce_frames,
+                )
 
         return event_type
+
+    def update_lost_tracks(self, active_track_ids: Set[int], current_frame: int) -> None:
+        """Maintains the recent lost tracks buffer for tracking continuity."""
+        for tid, state in list(self.tracks.items()):
+            if tid not in active_track_ids:
+                if (current_frame - state.last_seen_frame) <= 25 and state.last_position is not None:
+                    # Only add if not already in lost tracks
+                    if not any(lt["track_id"] == tid for lt in self.recent_lost_tracks):
+                        self.recent_lost_tracks.append({
+                            "track_id": tid,
+                            "pos": state.last_position,
+                            "side": state.last_known_side,
+                            "frame_idx": state.last_seen_frame,
+                            "last_count_frame": state.last_count_frame,
+                            "matched": False,
+                        })
 
     def reset(self) -> None:
         """Resets all tracking states and counter tallies."""
         self.tracks.clear()
+        self.recent_lost_tracks.clear()
         self.total_entries = 0
         self.total_exits = 0
         self.crossing_events.clear()
@@ -367,6 +459,7 @@ class VideoProcessor:
         self.stop_requested = False
         self.is_running = False
         self.crossing_counter: Optional[LineCrossingCounter] = None
+        self.starting_occupancy: int = 0
 
     def stop(self) -> None:
         """Requests the processing loop to stop gracefully."""
@@ -376,9 +469,15 @@ class VideoProcessor:
         """Configures the VirtualLine and LineCrossingCounter based on video dimensions."""
         if self.line_coords:
             x1, y1, x2, y2 = self.line_coords
-            line = VirtualLine(pt1=(x1, y1), pt2=(x2, y2))
+            # Check if line_coords are normalized [0.0, 1.0] or absolute pixels
+            if all(0.0 <= c <= 1.0 for c in (x1, y1, x2, y2)) and (x2 <= 1.0 and y2 <= 1.0):
+                x1 = int(x1 * frame_width)
+                x2 = int(x2 * frame_width)
+                y1 = int(y1 * frame_height)
+                y2 = int(y2 * frame_height)
+            line = VirtualLine(pt1=(int(x1), int(y1)), pt2=(int(x2), int(y2)))
         else:
-            # Default horizontal line across frame width at line_position
+            # Horizontal line across frame width at line_position
             line_y = int(frame_height * self.line_position)
             line = VirtualLine(pt1=(0, line_y), pt2=(frame_width, line_y))
 
@@ -388,6 +487,7 @@ class VideoProcessor:
             debounce_frames=self.debounce_frames,
             counter=self.counter,
             point_mode=self.point_mode,
+            run_id=self.run_id,
         )
 
     def process_video(
@@ -398,11 +498,6 @@ class VideoProcessor:
     ) -> Dict[str, Any]:
         """
         Processes a local video file frame by frame.
-
-        Args:
-            video_path: Path to the video file.
-            max_frames: Optional maximum number of frames to process (useful for testing).
-            progress_callback: Optional callback reporting per-frame progress.
 
         Returns:
             Dict[str, Any]: Execution summary including frames processed, entries, exits, and final stats.
@@ -430,12 +525,17 @@ class VideoProcessor:
         self.crossing_counter = self._init_crossing_counter(width, height)
         self.stop_requested = False
         self.is_running = True
+        self.starting_occupancy = self.counter.current_occupancy if self.counter else 0
 
-        line_desc = f"coords={self.line_coords}" if self.line_coords else f"y={self.crossing_counter.line.pt1[1]} ({int(self.line_position * 100)}%)"
+        line_desc = (
+            f"coords={self.line_coords}"
+            if self.line_coords
+            else f"y={self.crossing_counter.line.pt1[1]} ({int(self.line_position * 100)}% of {height}px)"
+        )
         logger.info(
-            "[%s] STARTING video processing on '%s' | %dx%d, %d frames @ %.1f FPS | line=[%s], dir=%s, mode=%s, conf=%.2f",
+            "[%s] STARTING video processing on '%s' | %dx%d, %d frames @ %.1f FPS | line=[%s], dir=%s, mode=%s, conf=%.2f | starting_occupancy=%d",
             self.run_id, os.path.basename(video_path), width, height, total_frames, fps,
-            line_desc, self.entry_direction, self.point_mode, self.conf_threshold,
+            line_desc, self.entry_direction, self.point_mode, self.conf_threshold, self.starting_occupancy,
         )
 
         debug_writer = None
@@ -457,7 +557,6 @@ class VideoProcessor:
             while cap.isOpened() and not self.stop_requested:
                 ret, frame = cap.read()
                 if not ret or frame is None:
-                    # End of video reached gracefully
                     break
 
                 processed_frames += 1
@@ -474,6 +573,7 @@ class VideoProcessor:
 
                 frame_events = []
                 annotated_boxes = []
+                active_tids_in_frame: Set[int] = set()
 
                 if results and len(results) > 0 and results[0].boxes is not None:
                     boxes = results[0].boxes
@@ -486,32 +586,29 @@ class VideoProcessor:
 
                         for tid, bbox, conf_score in zip(ids_list, xyxy_list, confs_list):
                             if tid is not None and tid >= 0:
-                                unique_track_ids.add(int(tid))
+                                tid_int = int(tid)
+                                active_tids_in_frame.add(tid_int)
+                                unique_track_ids.add(tid_int)
                                 evt = self.crossing_counter.update(
-                                    track_id=int(tid),
+                                    track_id=tid_int,
                                     bbox=tuple(bbox),
                                     frame_idx=processed_frames,
                                     timestamp=time.time(),
-                                    )
+                                )
                                 if evt:
-                                    frame_events.append((tid, evt))
-                                    recent_crossing_label = f"+1 {evt.upper()} (ID: {tid})"
+                                    frame_events.append((tid_int, evt))
+                                    recent_crossing_label = f"+1 {evt.upper()} (ID: {tid_int})"
                                     recent_crossing_expiry = processed_frames + 25
-                                    cx = (bbox[0] + bbox[2]) / 2
-                                    cy = (bbox[1] + bbox[3]) / 2 if self.point_mode == "center" else bbox[3]
-                                    logger.info(
-                                        "[%s] CROSSING DETECTED at frame %d: Track ID %d -> %s | pos=(%.1f, %.1f) | Run Entries=%d, Run Exits=%d",
-                                        self.run_id, processed_frames, tid, evt.upper(), cx, cy,
-                                        self.crossing_counter.total_entries, self.crossing_counter.total_exits,
-                                    )
 
                                 if debug_writer:
-                                    annotated_boxes.append((tid, bbox, conf_score))
+                                    annotated_boxes.append((tid_int, bbox, conf_score))
+
+                # Update lost tracks buffer for tracking continuity
+                self.crossing_counter.update_lost_tracks(active_tids_in_frame, processed_frames)
 
                 # Render debug annotated video frame if enabled
                 if debug_writer is not None:
                     dbg_frame = frame.copy()
-                    # Draw virtual doorway line
                     pt1 = self.crossing_counter.line.pt1
                     pt2 = self.crossing_counter.line.pt2
                     cv2.line(dbg_frame, pt1, pt2, (0, 255, 255), 2)
@@ -523,14 +620,16 @@ class VideoProcessor:
                         x1, y1, x2, y2 = [int(v) for v in bbox]
                         cx = int((x1 + x2) / 2)
                         cy = int((y1 + y2) / 2) if self.point_mode == "center" else int(y2)
-                        # Box and ID
                         cv2.rectangle(dbg_frame, (x1, y1), (x2, y2), (40, 200, 40), 2)
                         cv2.circle(dbg_frame, (cx, cy), 5, (0, 140, 255), -1)
                         cv2.putText(dbg_frame, f"ID:{tid} ({conf_score:.2f})", (x1, max(18, y1 - 6)),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (40, 255, 40), 2)
 
-                    # Top stats HUD overlay
-                    hud_text = f"Frames: {processed_frames}/{total_frames} | Entries: {self.crossing_counter.total_entries} | Exits: {self.crossing_counter.total_exits}"
+                    hud_text = (
+                        f"Frames: {processed_frames}/{total_frames} | "
+                        f"Run Entries: {self.crossing_counter.total_entries} | "
+                        f"Run Exits: {self.crossing_counter.total_exits}"
+                    )
                     cv2.rectangle(dbg_frame, (10, 10), (min(width - 10, 520), 45), (30, 30, 30), -1)
                     cv2.putText(dbg_frame, hud_text, (20, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
@@ -547,18 +646,24 @@ class VideoProcessor:
 
                 if processed_frames % 50 == 0 or processed_frames == total_frames:
                     logger.info(
-                        "[%s] Progress: %d/%d frames (%.1f%%) | %.1f FPS | Tracks=%d | Entries=%d | Exits=%d",
+                        "[%s] Progress: %d/%d frames (%.1f%%) | %.1f FPS | Tracks=%d | Run Entries=%d | Run Exits=%d",
                         self.run_id, processed_frames, total_frames, (processed_frames / max(1, total_frames)) * 100,
-                        current_fps, len(unique_track_ids), self.crossing_counter.total_entries, self.crossing_counter.total_exits,
+                        current_fps, len(unique_track_ids),
+                        self.crossing_counter.total_entries, self.crossing_counter.total_exits,
                     )
 
                 if progress_callback:
+                    run_entries = self.crossing_counter.total_entries
+                    run_exits = self.crossing_counter.total_exits
+                    run_occ = max(0, self.starting_occupancy + run_entries - run_exits)
                     progress_callback({
                         "processed_frames": processed_frames,
                         "total_frames": total_frames,
                         "progress_percentage": round((processed_frames / max(1, total_frames)) * 100.0, 1),
-                        "entries": self.crossing_counter.total_entries,
-                        "exits": self.crossing_counter.total_exits,
+                        "entries": run_entries,
+                        "exits": run_exits,
+                        "starting_occupancy": self.starting_occupancy,
+                        "run_occupancy": run_occ,
                         "fps": current_fps,
                     })
 
@@ -572,11 +677,14 @@ class VideoProcessor:
             self.is_running = False
 
         duration = round(time.time() - start_time, 2)
+        run_entries = self.crossing_counter.total_entries
+        run_exits = self.crossing_counter.total_exits
+        run_occ = max(0, self.starting_occupancy + run_entries - run_exits)
+
         logger.info(
-            "[%s] FINISHED video '%s' in %.2fs (%.1f FPS) | %d/%d frames | Entries=%d, Exits=%d | Tracks=%d",
+            "[%s] FINISHED video '%s' in %.2fs (%.1f FPS) | %d/%d frames | Run Entries=%d, Run Exits=%d | Starting Occupancy=%d, Final Run Occupancy=%d",
             self.run_id, os.path.basename(video_path), duration, round(processed_frames / max(1e-4, duration), 1),
-            processed_frames, total_frames, self.crossing_counter.total_entries, self.crossing_counter.total_exits,
-            len(unique_track_ids),
+            processed_frames, total_frames, run_entries, run_exits, self.starting_occupancy, run_occ,
         )
         summary = {
             "status": "stopped" if self.stop_requested else "completed",
@@ -586,8 +694,10 @@ class VideoProcessor:
             "processed_frames": processed_frames,
             "duration_seconds": duration,
             "average_fps": round(processed_frames / max(1e-4, duration), 1),
-            "entries_detected": self.crossing_counter.total_entries,
-            "exits_detected": self.crossing_counter.total_exits,
+            "starting_occupancy": self.starting_occupancy,
+            "run_occupancy": run_occ,
+            "entries_detected": run_entries,
+            "exits_detected": run_exits,
             "point_mode": self.point_mode,
             "debug_video_path": debug_video_path if self.save_debug_video else None,
             "occupancy_stats": self.counter.get_stats() if self.counter else None,
@@ -599,6 +709,7 @@ class VideoJobManager:
     """
     Manages asynchronous, non-blocking video processing jobs in a background thread.
     Ensures that long video processing does not block FastAPI health or stats requests.
+    Maintains clean separation between run-specific counts and historical counter state.
     """
 
     def __init__(self, counter: OccupancyCounter):
@@ -610,6 +721,9 @@ class VideoJobManager:
         self._status: str = "idle"
         self._error: Optional[str] = None
         self._video_path: Optional[str] = None
+        self._run_id: Optional[str] = None
+        self._starting_occupancy: int = 0
+        self._run_occupancy: int = 0
         self._total_frames: int = 0
         self._processed_frames: int = 0
         self._progress_percentage: float = 0.0
@@ -618,7 +732,6 @@ class VideoJobManager:
         self._current_fps: float = 0.0
         self._debug_video_path: Optional[str] = None
         self._point_mode: str = "center"
-        self._run_id: Optional[str] = None
 
     def get_status(self) -> Dict[str, Any]:
         """Returns the current background job status and occupancy stats."""
@@ -627,6 +740,8 @@ class VideoJobManager:
                 "status": self._status,
                 "video_path": self._video_path,
                 "run_id": self._run_id,
+                "starting_occupancy": self._starting_occupancy,
+                "run_occupancy": self._run_occupancy,
                 "total_frames": self._total_frames,
                 "processed_frames": self._processed_frames,
                 "progress_percentage": self._progress_percentage,
@@ -647,6 +762,8 @@ class VideoJobManager:
             self._progress_percentage = progress.get("progress_percentage", 0.0)
             self._entries_detected = progress.get("entries", 0)
             self._exits_detected = progress.get("exits", 0)
+            self._starting_occupancy = progress.get("starting_occupancy", self._starting_occupancy)
+            self._run_occupancy = progress.get("run_occupancy", max(0, self._starting_occupancy + self._entries_detected - self._exits_detected))
             self._current_fps = progress.get("fps", 0.0)
 
     def _run_worker(self, processor: VideoProcessor, video_path: str, max_frames: Optional[int]) -> None:
@@ -661,11 +778,14 @@ class VideoJobManager:
                 self._status = summary.get("status", "completed")
                 self._entries_detected = summary.get("entries_detected", 0)
                 self._exits_detected = summary.get("exits_detected", 0)
+                self._starting_occupancy = summary.get("starting_occupancy", self._starting_occupancy)
+                self._run_occupancy = summary.get("run_occupancy", max(0, self._starting_occupancy + self._entries_detected - self._exits_detected))
                 self._processed_frames = summary.get("processed_frames", 0)
                 self._total_frames = summary.get("total_frames", self._total_frames)
                 self._progress_percentage = 100.0 if self._status == "completed" else self._progress_percentage
                 self._debug_video_path = summary.get("debug_video_path")
         except Exception as exc:
+            logger.exception("[%s] Video processing worker error: %s", getattr(processor, "run_id", "unknown"), exc)
             with self._lock:
                 self._status = "failed"
                 self._error = str(exc)
@@ -684,6 +804,7 @@ class VideoJobManager:
     ) -> Dict[str, Any]:
         """
         Validates parameters and starts video processing in a background daemon thread.
+        Guarantees that run metrics are isolated to this specific execution.
         """
         with self._lock:
             if self._status == "running":
@@ -693,7 +814,12 @@ class VideoJobManager:
                 raise FileNotFoundError(f"Video file not found: {video_path}")
 
             run_id = f"run_{uuid.uuid4().hex[:6]}"
-            logger.info("[JOB %s] Initializing video processing for '%s'", run_id, os.path.basename(video_path))
+            starting_occ = self.counter.current_occupancy
+
+            logger.info(
+                "[JOB %s] Initializing video processing for '%s' | Starting Occupancy=%d",
+                run_id, os.path.basename(video_path), starting_occ
+            )
 
             self._processor = VideoProcessor(
                 counter=self.counter,
@@ -711,6 +837,8 @@ class VideoJobManager:
             self._status = "running"
             self._error = None
             self._video_path = video_path
+            self._starting_occupancy = starting_occ
+            self._run_occupancy = starting_occ
             self._total_frames = 0
             self._processed_frames = 0
             self._progress_percentage = 0.0

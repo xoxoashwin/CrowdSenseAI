@@ -437,8 +437,8 @@ def test_occupancy_reconstruction_with_video_generated_events(temp_db):
 
     assert stats2["total_entries"] == stats1["total_entries"] == 5
     assert stats2["total_exits"] == stats1["total_exits"] == 3
-    assert stats2["current_occupancy"] == stats1["current_occupancy"] == 3
-    assert stats2["peak_occupancy"] == stats1["peak_occupancy"] == 3
+    assert stats2["current_occupancy"] == stats1["current_occupancy"] == 2
+    assert stats2["peak_occupancy"] == stats1["peak_occupancy"] == 2
 
 
 

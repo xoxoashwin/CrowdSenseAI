@@ -31,3 +31,4 @@ dist/
 
 # Temporary scratch files
 scratch/
+*.pdf
